@@ -1,4 +1,5 @@
 import { Command } from "commander";
+import { providersModels } from "../store/db";
 
 export const modelsCommand = new Command("models")
   .description('Returns all the supported models')
@@ -6,5 +7,6 @@ export const modelsCommand = new Command("models")
   .action((options) => {
     console.log("Listing models...");
 
-    console.log(options)
+    // console.log(options)
+    console.log(providersModels);
 });
