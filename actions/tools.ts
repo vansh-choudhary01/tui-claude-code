@@ -1,4 +1,4 @@
-import { exec } from "child_process";
+import { exec, spawn } from "child_process";
 import fs from "fs/promises";
 
 interface WebSearchResponse {
@@ -125,66 +125,100 @@ export async function WebSearch(query: string): Promise<WebSearchResult> {
 // 3. readFile tool
 // 4. writeFile tool
 
-export async function BashTool(command: string): Promise<string> {
+const pwd = "" + process.cwd() + "/.agent_workspace/projects";
 
-    return new Promise((resolve, reject) => {
-        exec(command, (error, stdout, stderr) => {
-            if (error) {
-                reject(error);
-            } else {
-                resolve(stdout);
-            }
-        });
+export async function BashTool(command: string): Promise<string> {
+    const fullCommand = `cd ${pwd} && ${command}`;
+
+    const child = spawn(fullCommand, { shell: true });
+
+    let output = "";
+    let errorOutput = "";
+
+    child.stdout.on("data", (data) => {
+        console.log(`stdout: ${data}`);
+        output += data.toString();
     });
+
+    child.stderr.on("data", (data) => {
+        console.error(`stderr: ${data}`);
+        errorOutput += data.toString();
+    });
+    
+    // setTimeout(() => {
+    //     child.kill();
+    // }, 10000); // Kill the process after 10 seconds
+
+    await Promise.race([
+        new Promise<void>((resolve) => {
+            child.on("close", () => resolve());
+        })
+    ]);
+
+    if (errorOutput) {
+        console.error("Error executing BashTool:", errorOutput);
+        return `Error: ${errorOutput}`;
+    }
+    return output;
 }
 
 export async function ReadFileTool(filePath: string): Promise<string> {
-    return await fs.readFile(filePath, "utf8");
+    const fullFilePath = `${pwd}/${filePath}`;
+    return await fs.readFile(fullFilePath, "utf8");
 }
 
 export async function WriteFileTool(filePath: string, content: string): Promise<void> {
-    await fs.writeFile(filePath, content, "utf8");
+    const fullFilePath = `${pwd}/${filePath}`;
+    await fs.writeFile(fullFilePath, content, "utf8");
 }
 
 export async function runTool(toolCall: ToolCall): Promise<ToolRunResult> {
-    const args = toolCall.args ?? {};
+    try {
+        const args = toolCall.args ?? {};
 
-    if (toolCall.name === "WebSearch") {
+        if (toolCall.name === "WebSearch") {
+            return {
+                tool: toolCall.name,
+                args,
+                result: await WebSearch(String(args.query ?? ""))
+            };
+        }
+
+        if (toolCall.name === "BashTool") {
+            return {
+                tool: toolCall.name,
+                args,
+                result: await BashTool(String(args.command ?? ""))
+            };
+        }
+
+        if (toolCall.name === "ReadFileTool") {
+            return {
+                tool: toolCall.name,
+                args,
+                result: await ReadFileTool(String(args.filePath ?? ""))
+            };
+        }
+
+        if (toolCall.name === "WriteFileTool") {
+            await WriteFileTool(String(args.filePath ?? ""), String(args.content ?? ""));
+            return {
+                tool: toolCall.name,
+                args,
+                result: "File written successfully"
+            };
+        }
+
         return {
             tool: toolCall.name,
             args,
-            result: await WebSearch(String(args.query ?? ""))
+            result: `Unknown tool: ${toolCall.name}`
         };
-    }
-
-    if (toolCall.name === "BashTool") {
+    } catch (error) {
         return {
             tool: toolCall.name,
-            args,
-            result: await BashTool(String(args.command ?? ""))
+            args: toolCall.args,
+            result: `Error executing tool: ${error instanceof Error ? error.message : String(error)}`
         };
     }
-
-    if (toolCall.name === "ReadFileTool") {
-        return {
-            tool: toolCall.name,
-            args,
-            result: await ReadFileTool(String(args.filePath ?? ""))
-        };
-    }
-
-    if (toolCall.name === "WriteFileTool") {
-        await WriteFileTool(String(args.filePath ?? ""), String(args.content ?? ""));
-        return {
-            tool: toolCall.name,
-            args,
-            result: "File written successfully"
-        };
-    }
-
-    return {
-        tool: toolCall.name,
-        args,
-        result: `Unknown tool: ${toolCall.name}`
-    };
 }

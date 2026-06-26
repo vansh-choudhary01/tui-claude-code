@@ -3,6 +3,11 @@ import { modelsCommand } from './commands/models';
 import { agentCommand } from './commands/agent';
 import { providerCommand } from './commands/providers';
 import { chatCommand } from './commands/chat';
+import fs from 'fs';
+import path from 'path';
+
+const WORKSPACE_DIR = path.join(process.cwd(), '.agent_workspace', 'projects');
+fs.mkdirSync(WORKSPACE_DIR, { recursive: true });
 
 program
   .name('opencode')

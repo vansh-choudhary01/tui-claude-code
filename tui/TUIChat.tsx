@@ -3,7 +3,7 @@ import { Box, Text, useInput } from "ink";
 import TextInput from "ink-text-input";
 import { callLlm } from "../actions/llm";
 
-interface TUIChatProps {}
+interface TUIChatProps { }
 
 type Message = string;
 
@@ -14,6 +14,7 @@ interface SubmitHandler {
 export function TUIChat(props: TUIChatProps): React.ReactElement {
   const [input, setInput] = useState<string>("");
   const [messages, setMessages] = useState<Message[]>([]);
+  const [inProgressInput, setInProgressInput] = useState<string>("");
 
   useInput((input, key) => {
     if (key.escape) {
@@ -22,17 +23,23 @@ export function TUIChat(props: TUIChatProps): React.ReactElement {
   });
 
   async function handleSubmit(value: string) {
-    if (!value.trim()) return;
+    try {
+      if (!value.trim()) return;
 
-    // const llmResponse = await callLlm(value); // Call the LLM with the user input
+      setInProgressInput(value);
+      setInput("");
+      const llmResponse = await callLlm(value); // Call the LLM with the user input
 
-    setMessages((prev) => [
-      ...prev,
-      `You: ${value}`,
-      `AI: Received "${value}"`, // Display the LLM response
-    ]);
+      setMessages((prev) => [
+        ...prev,
+        `You: ${value}`,
+        `AI: Received "${llmResponse}"`, // Display the LLM response
+      ]);
 
-    setInput("");
+      setInProgressInput("");
+    } catch (error) {
+      console.error("Error calling LLM:", error);
+    }
   }
 
   return (
@@ -45,6 +52,12 @@ export function TUIChat(props: TUIChatProps): React.ReactElement {
           <Text key={index}>{msg}</Text>
         ))}
       </Box>
+      {inProgressInput && (
+        <Box marginTop={1}>
+          <Text color="blue">You: </Text>
+          <Text dimColor>{inProgressInput}</Text>
+        </Box>
+      )}
 
       <Box marginTop={1}>
         <Text>{"> "}</Text>

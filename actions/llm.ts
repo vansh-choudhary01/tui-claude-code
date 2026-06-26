@@ -58,8 +58,11 @@ async function callGemini(prompt: string): Promise<string> {
             response += part.text;
         }
 
+        // remove ```json and ``` if present
+        response = response.replace(/```json/g, "").replace(/```/g, "").trim();
+
         const isJson = response.trim().startsWith("{") && response.trim().endsWith("}");
-        const parsed = isJson ? JSON.parse(response) : null;
+        const parsed = isJson ? JSON.parse(response.trim()) : null;
 
         if (parsed?.tools) {
             toolCalls.push(...parsed.tools);
@@ -69,6 +72,7 @@ async function callGemini(prompt: string): Promise<string> {
         }
     }
 
+    console.log("Final response from Gemini:", response);
     return response;
 }
 
@@ -82,7 +86,7 @@ ${toolExamples}
 
 otherwise, respond with a helpful answer to the user's message formatted as follows:
 {
-    "thoughts": "your reasoning about the user request and what files need to be updated",
+    "thoughts": "your reasoning about the user request and what files need to be updated and this will show directly to user so it's not include what you are thinking it's for user.",
     "appendSummary": "a concise summary of the changes made and the current state of the project after this update, and make sure don't repeat existing summery i'll just append this to the existing summery and use it as context for future interactions, and if no changes were made, stay silent and don't include this field in your response"
 }
 
