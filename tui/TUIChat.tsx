@@ -33,7 +33,7 @@ export function TUIChat(props: TUIChatProps): React.ReactElement {
       setMessages((prev) => [
         ...prev,
         `You: ${value}`,
-        `AI: Received "${llmResponse}"`, // Display the LLM response
+        `AI: "${llmResponse}"`, // Display the LLM response
       ]);
 
       setInProgressInput("");

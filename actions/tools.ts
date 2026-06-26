@@ -85,6 +85,26 @@ export const tools: Tool[] = [
             type: "string",
             description: "The content to write to the file."
         }]
+    }, {
+        name: "UpdateFileContentTool",
+        description: "Update specific lines in a file with new content.",
+        args: [{
+            name: "filePath",
+            type: "string",
+            description: "The path to the file to update."
+        }, {
+            name: "startLine",
+            type: "number",
+            description: "The starting line number to replace."
+        }, {
+            name: "endLine",
+            type: "number",
+            description: "The ending line number to replace."
+        }, {
+            name: "newContent",
+            type: "string",
+            description: "The new content to insert."
+        }]
     }
 ];
 
@@ -230,7 +250,7 @@ export async function WriteFileTool(filePath: string, content: string): Promise<
     await fs.writeFile(fullFilePath, content, "utf8");
 }
 
-export async function updateFileContent(filePath: string, startLine: number, endLine: number, newContent: string): Promise<void> {
+export async function UpdateFileContentTool(filePath: string, startLine: number, endLine: number, newContent: string): Promise<void> {
     const fullFilePath = `${pwd}/${filePath}`;
 
     const fileContent = await fs.readFile(fullFilePath, "utf8");
@@ -281,7 +301,7 @@ export async function runTool(toolCall: ToolCall): Promise<ToolRunResult> {
         }
 
         if (toolCall.name === "UpdateFileContentTool") {
-            await updateFileContent(
+            await UpdateFileContentTool(
                 String(args.filePath ?? ""),
                 Number(args.startLine ?? 0),
                 Number(args.endLine ?? 0),

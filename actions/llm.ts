@@ -29,18 +29,31 @@ const toolExamples = `{
         "args": {"filePath": "/path/to/file.txt"}
     }, {
         "name": "WriteFileTool",
-        "args": {"filePath": "/path/to/file.txt", "content": "Hello, World!"}
+        "args": {"filePath": "/path/to/file.txt", "content": "import express from 'express';
+        const app = express();
+        app.get('/', (req, res) => {
+            res.send('Hello World!');
+        });
+        app.listen(3000, () => {
+            console.log('Server is running on port 3000');
+        });"}
     }, {
         "name": "updateFileContent",
-        "args": {"filePath": "/path/to/file.txt", "startLine": 1, "endLine": 3, "newContent": "Updated content"}
+        "args": {"filePath": "/path/to/file.txt", "startLine": 4, "endLine": 6, "newContent": "const count = 5;
+        array.forEach(item, idx => {
+            if (idx === count) {
+                console.log('Reached the count limit.');
+            }
+            console.log(item);
+        });"}
     }],
 }`;
 
-async function callGemini(prompt: string): Promise<string> {
+async function callGemini(systemPrompt: string, userMessage: string): Promise<string> {
     const genai = new GoogleGenAI({ apiKey: setKeys.gemini });
     const toolCalls: any[] = [];
     let initialPrompt = true;
-    let finalPrompt = prompt;
+    let finalPrompt = `${systemPrompt}\nUser message: ${userMessage}`;
     let response = "";
 
     while (toolCalls.length > 0 || initialPrompt) {
@@ -63,7 +76,7 @@ async function callGemini(prompt: string): Promise<string> {
         }
 
         // remove ```json and ``` if present
-        response = response.replace(/```json/g, "").replace(/```/g, "").trim();
+        response = response.replace(/```json/g, "").replace(/```/g, "").trim().replace(/,(\s*[}\]])/g, "$1");
 
         const isJson = response.trim().startsWith("{") && response.trim().endsWith("}");
         const parsed = isJson ? JSON.parse(response.trim()) : null;
@@ -80,11 +93,11 @@ async function callGemini(prompt: string): Promise<string> {
     return response;
 }
 
-async function callOpenAI(prompt: string): Promise<string> {
+async function callOpenAI(systemPrompt: string, userMessage: string): Promise<string> {
     const openai = new OpenAI({ apiKey: setKeys.openai });
     const toolCalls: any[] = [];
     let initialPrompt = true;
-    let finalPrompt = prompt;
+    let finalPrompt = systemPrompt;
     let response = "";
 
     while (toolCalls.length > 0 || initialPrompt) {
@@ -98,7 +111,7 @@ async function callOpenAI(prompt: string): Promise<string> {
 
         const responseStream = await openai.chat.completions.create({
             model: defaultProvider.model,
-            messages: [{ role: "user", content: finalPrompt }],
+            messages: [{ role: "user", content: userMessage }, { role: "system", content: finalPrompt }],
             stream: true
         });
 
@@ -108,7 +121,7 @@ async function callOpenAI(prompt: string): Promise<string> {
         }
 
         // remove ```json and ``` if present
-        response = response.replace(/```json/g, "").replace(/```/g, "").trim();
+        response = response.replace(/```json/g, "").replace(/```/g, "").trim().replace(/,(\s*[}\]])/g, "$1");
         console.log("Raw response from OpenAI:", response);
 
         const isJson = response.trim().startsWith("{") && response.trim().endsWith("}");
@@ -129,33 +142,129 @@ async function callOpenAI(prompt: string): Promise<string> {
 export async function callLlm(userMessage: string): Promise<string> {
     pushMessage("user", userMessage);
 
-    const prompt = `You are a helpful worker that complete tasks and use tools to complete given tasks. Use the following tools when needed: ${toolDescriptions}.
-If you use a tool, respond ONLY with json in this format: {"tools": [{ "name": "<tool_name>", "args": { <args> } }]}
-and to see user's projects try ls through bash tool
-tool examples:
-${toolExamples}
+    const systemPrompt = `
+You are a task-completion agent with access to tools. You MUST respond with ONLY valid JSON — no prose, no markdown, no extra text.
 
-otherwise, respond with a helpful answer to the user's message formatted as follows make sure it's valid json and if comma(,) is added at the end of the last key-value pair, remove it:
-and if you are going to proceed with user's task, make sure first you complete the task then only respond with the answer
+---
+
+## AVAILABLE TOOLS
+${toolDescriptions}
+
+---
+
+## CORE BEHAVIOR
+
+You are a **coding agent**, not an advisor. When the user asks you to update, create, or modify files:
+- You MUST use tools to READ the actual files first, then WRITE the changes.
+- NEVER describe what you would do. NEVER suggest ideas. NEVER search the web.
+- NEVER say "I have updated" unless you actually called a write/edit tool.
+- If you cannot find or read the file, say so. Do not pretend.
+
+---
+
+## CONVERSATION BEHAVIOR
+
+You are also a friendly assistant. For casual messages like greetings, questions about your capabilities, or general chat:
+- Respond naturally and helpfully in the "answer" field.
+- Do NOT run any tools.
+- Do NOT say "No task requested."
+
+Examples of what you can do when asked:
+- List and navigate projects
+- Read, write, and edit files
+- Run shell commands
+- Update UI/code in any project file
+- Create new files or components
+
+Example responses for casual messages:
+- User: "hi" → { "answer": "Hey! I'm your coding agent. I can read, write, and edit files in your projects, run shell commands, and help you build things. What would you like to work on?" }
+- User: "what can you do" → { "answer": "I can list your projects, read and edit any file, run terminal commands, update your UI, and more. Just tell me what you want to build or change!" }
+
+---
+
+## RESPONSE RULES
+
+### Rule 1 — Tool call (when you need to use a tool):
+Respond ONLY with:
 {
-    "answer": "this will show directly to user and make sure to answer user's question and provide helpful information, and if you need to ask user for more information to answer their question, ask them in a clear and concise manner otherwise his task should be completed using the tools provided, and if you need to call any tools use the tools format above and don't respond with any other text, only respond with json and nothing else",
-    "appendSummary": "a concise summary of the changes made and the current state of the project after this update, and make sure don't repeat existing summery i'll just append this to the existing summery and use it as context for future interactions, and if no changes were made, stay silent and don't include this field in your response "
+  "tools": [
+    {
+      "name": "<tool_name>",
+      "args": { <args> }
+    }
+  ]
 }
 
-Previous summary:
-${getSummary() || "No conversation yet."}
+### Rule 2 — Final answer (after task is fully done):
+Respond ONLY with:
+{
+  "answer": "<What you actually did. Reference real file paths and changes made. or simple conversation if user don't ask for any task.>",
+  "appendSummary": "<Concise summary of changes and current project state. OMIT this field entirely if no changes were made.>"
+}
+
+---
+
+## TASK EXECUTION ORDER
+
+For ANY file modification task, follow this exact sequence:
+1. Run \`ls\` to find the project directory.
+2. Read the relevant files using the read/cat tool.
+3. Write the updated content using the write/edit tool.
+4. Confirm the change in your "answer".
+
+Do NOT skip steps. Do NOT respond with an answer before completing all tool calls.
+
+---
+
+## STRICT PROHIBITIONS
+- NEVER include both "tools" and "answer" in the same response.
+- NEVER include trailing commas in JSON.
+- For file/code tasks: use tools to make actual changes, don't just describe them.
+- For questions and conversation: answer helpfully and naturally.
+- NEVER fake a task completion. Only say it's done if you used a tool to do it.
+- NEVER say a file was updated unless WriteFileTool was actually called with real code content.
+- NEVER put answer text or summary text into file content. File content must be real, valid code only.
+- NEVER assume a tool worked. Always verify by reading the file back after writing.
+
+---
+
+## UPDATING A FILE
+
+When user asks to update a file:
+1. BashTool: find the file → "find . -name '*.js'"
+2. ReadFileTool: read current content of the file
+3. WriteFileTool: write the COMPLETE updated file with real code — NOT a description
+4. ReadFileTool: read it back to confirm the write worked
+5. Only then only continue
+
+The "content" arg in WriteFileTool must be actual code. Example:
+{
+  "name": "WriteFileTool",
+  "args": {
+    "filePath": "./designing-agency/src/App.js",
+    "content": "import React from 'react';\n\nexport default function App() {\n  return <div className='container'>...</div>;\n}"
+  }
+}
+
+---
+
+## TOOL EXAMPLES
+${toolExamples}
+
+---
+
+## CONVERSATION CONTEXT
+${getSummary() || "No conversation history yet."}
 
 Message history:
-${getFormattedHistory()}
-
-User message: ${userMessage}`;
+${getFormattedHistory()}`;
 
     let response = "";
 
     if (defaultProvider.name === "gemini") {
-        response = await callGemini(prompt);
+        response = await callGemini(systemPrompt, userMessage);
     } else if (defaultProvider.name === "openai") {
-        response = await callOpenAI(prompt);
+        response = await callOpenAI(systemPrompt, userMessage);
     } else {
         throw new Error(`Unsupported provider: ${defaultProvider.name}`);
     }
@@ -164,24 +273,22 @@ User message: ${userMessage}`;
 
     // append summary if LLM returned one
     const isJson = response.trim().startsWith("{") && response.trim().endsWith("}");
-    if (isJson) {
-        const parsed = JSON.parse(response);
-        if (parsed.appendSummary) {
-            appendSummary(parsed.appendSummary);
-        }
+    const parsed = isJson ? JSON.parse(response) : null;
+    if (parsed && parsed.appendSummary) {
+        appendSummary(parsed.appendSummary);
     }
 
     // compress summary when it grows too long
     if (getSummary().length > SUMMARY_COMPRESS_THRESHOLD) {
         const summaryResponse = await (defaultProvider.name === "gemini"
-            ? callGemini(generateSummeryGenerationPrompt())
+            ? callGemini(generateSummeryGenerationPrompt(), "")
             : defaultProvider.name === "openai"
-                ? callOpenAI(generateSummeryGenerationPrompt())
-            : Promise.reject(new Error("Unsupported provider")));
+                ? callOpenAI(generateSummeryGenerationPrompt(), "")
+                : Promise.reject(new Error("Unsupported provider")));
         const parsed = JSON.parse(summaryResponse);
         replaceSummary(parsed.newSummary);
         console.log("New Summary after summarization:", parsed.newSummary);
     }
 
-    return response;
+    return parsed?.answer || response;
 }

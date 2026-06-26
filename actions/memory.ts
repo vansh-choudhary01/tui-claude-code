@@ -24,7 +24,17 @@ export function getSummary(): string {
 }
 
 export function getFormattedHistory(): string {
-    return messageHistory.map(m => `- ${m.role}: ${m.content}`).join("\n");
+    return messageHistory.map(m => {
+        if (m.role === "assistant") {
+            try {
+                const parsed = JSON.parse(m.content);
+                return `- assistant: ${parsed.answer || m.content}`;
+            } catch {
+                return `- assistant: ${m.content}`;
+            }
+        }
+        return `- ${m.role}: ${m.content}`;
+    }).join("\n");
 }
 
 export function generateSummeryGenerationPrompt(): string {
