@@ -34,7 +34,6 @@ try to cut 50% of the content from the original summery, but make sure to keep a
 "${summeryMemory}",
 response format:
 {
-  newSummary: "the new concise summary of the conversation so far, capturing the main points and decisions made during the conversation, as well as any important details about the project updates that have been discussed, while staying within the token limit, i'm directly switch my prev summery with this new summary so don't just add new summary here not your thoughts, just give me the new summary and nothing else, don't explain anything, just give me the new summary and nothing else",
-  thoughts: "your reasoning about how you generated the new summary and what information you included or excluded to make it more concise while still capturing the main points and decisions made during the conversation, as well as any important details about the project updates that have been discussed"
+  "newSummary": "the new concise summary of the conversation so far, capturing the main points and decisions made during the conversation, as well as any important details about the project updates that have been discussed, while staying within the token limit, i'm directly switch my prev summery with this new summary so don't just add new summary here not your thoughts, just give me the new summary and nothing else, don't explain anything, just give me the new summary and nothing else"
 }`;
 }

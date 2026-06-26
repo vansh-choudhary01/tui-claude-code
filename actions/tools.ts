@@ -1,4 +1,4 @@
-import { exec, spawn } from "child_process";
+import { ChildProcess, exec, spawn } from "child_process";
 import fs from "fs/promises";
 
 interface WebSearchResponse {
@@ -121,45 +121,103 @@ export async function WebSearch(query: string): Promise<WebSearchResult> {
     }
 }
 
-// 2. bash tool
-// 3. readFile tool
-// 4. writeFile tool
+type RunningProcess = {
+    child: ChildProcess;
+    command: string;
+    startedAt: Date;
+};
 
-const pwd = "" + process.cwd() + "/.agent_workspace/projects";
+const runningProcesses = new Map<number, RunningProcess>();
 
-export async function BashTool(command: string): Promise<string> {
-    const fullCommand = `cd ${pwd} && ${command}`;
+const pwd = process.cwd() + "/.agent_workspace/projects";
 
-    const child = spawn(fullCommand, { shell: true });
+export async function BashTool(command: string) {
+    return new Promise<{
+        output: string;
+        errorOutput: string;
+        pid: number | null;
+        running: boolean;
+    }>((resolve, reject) => {
 
-    let output = "";
-    let errorOutput = "";
+        const child = spawn(command, {
+            cwd: pwd,
+            shell: true,
+        });
 
-    child.stdout.on("data", (data) => {
-        console.log(`stdout: ${data}`);
-        output += data.toString();
+        let stdout = "";
+        let stderr = "";
+
+        let finished = false;
+
+        let idleTimer: NodeJS.Timeout;
+        let maxTimer: NodeJS.Timeout;
+
+        function finish(running: boolean) {
+            if (finished) return;
+
+            finished = true;
+
+            clearTimeout(idleTimer);
+            clearTimeout(maxTimer);
+
+            if (running && child.pid) {
+                runningProcesses.set(child.pid, {
+                    child,
+                    command,
+                    startedAt: new Date(),
+                });
+            }
+
+            resolve({
+                output: stdout,
+                errorOutput: stderr,
+                pid: child.pid ?? null,
+                running,
+            });
+        }
+
+        function resetIdleTimer() {
+            clearTimeout(idleTimer);
+
+            idleTimer = setTimeout(() => {
+                // no output for 2 sec
+                finish(!child.killed);
+            }, 2000);
+        }
+
+        child.stdout.on("data", chunk => {
+            const text = chunk.toString();
+
+            process.stdout.write(text);
+
+            stdout += text;
+
+            resetIdleTimer();
+        });
+
+        child.stderr.on("data", chunk => {
+            const text = chunk.toString();
+
+            process.stderr.write(text);
+
+            stderr += text;
+
+            resetIdleTimer();
+        });
+
+        child.on("error", reject);
+
+        child.on("close", () => {
+            finish(false);
+        });
+
+        // absolute max wait
+        maxTimer = setTimeout(() => {
+            finish(!child.killed);
+        }, 15000);
+
+        resetIdleTimer();
     });
-
-    child.stderr.on("data", (data) => {
-        console.error(`stderr: ${data}`);
-        errorOutput += data.toString();
-    });
-    
-    // setTimeout(() => {
-    //     child.kill();
-    // }, 10000); // Kill the process after 10 seconds
-
-    await Promise.race([
-        new Promise<void>((resolve) => {
-            child.on("close", () => resolve());
-        })
-    ]);
-
-    if (errorOutput) {
-        console.error("Error executing BashTool:", errorOutput);
-        return `Error: ${errorOutput}`;
-    }
-    return output;
 }
 
 export async function ReadFileTool(filePath: string): Promise<string> {
@@ -172,7 +230,20 @@ export async function WriteFileTool(filePath: string, content: string): Promise<
     await fs.writeFile(fullFilePath, content, "utf8");
 }
 
+export async function updateFileContent(filePath: string, startLine: number, endLine: number, newContent: string): Promise<void> {
+    const fullFilePath = `${pwd}/${filePath}`;
+
+    const fileContent = await fs.readFile(fullFilePath, "utf8");
+    const lines = fileContent.split("\n");
+
+    const newLines = newContent.split("\n");
+
+    lines.splice(startLine - 1, endLine - startLine + 1, ...newLines);
+    await fs.writeFile(fullFilePath, lines.join("\n"), "utf8");
+}
+
 export async function runTool(toolCall: ToolCall): Promise<ToolRunResult> {
+    console.log("Running tool:", toolCall);
     try {
         const args = toolCall.args ?? {};
 
@@ -206,6 +277,20 @@ export async function runTool(toolCall: ToolCall): Promise<ToolRunResult> {
                 tool: toolCall.name,
                 args,
                 result: "File written successfully"
+            };
+        }
+
+        if (toolCall.name === "UpdateFileContentTool") {
+            await updateFileContent(
+                String(args.filePath ?? ""),
+                Number(args.startLine ?? 0),
+                Number(args.endLine ?? 0),
+                String(args.newContent ?? "")
+            );
+            return {
+                tool: toolCall.name,
+                args,
+                result: "File content updated successfully"
             };
         }
 
