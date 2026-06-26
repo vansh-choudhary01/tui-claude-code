@@ -1,171 +1,127 @@
 import { GoogleGenAI } from "@google/genai";
 import { defaultProvider, setKeys } from "../store/db";
-import { getJson } from "serpapi";
+import { tools, runTool } from "./tools";
+import {
+    pushMessage,
+    appendSummary,
+    replaceSummary,
+    getSummary,
+    getFormattedHistory,
+    generateSummeryGenerationPrompt,
+} from "./memory";
 
-interface Tool {
-    name: string;
-    description: string;
-    args: Array<{
-        name: string;
-        type: string;
-        description: string;
-    }>;
+const SUMMARY_COMPRESS_THRESHOLD = 30;
+
+const toolDescriptions = tools.map(t =>
+    `${t.name}: ${t.description} : ${t.args.map(a => `${a.name}: ${a.type}`).join(", ")}`
+).join("; ");
+
+const toolExamples = `{
+    tools: [{
+        name: "WebSearch",
+        args: {"query": "What is the capital of France?"}
+    }, {
+        name: "BashTool",
+        args: {"command": "ls -la"}
+    }, {
+        name: "ReadFileTool",
+        args: {"filePath": "/path/to/file.txt"}
+    }, {
+        name: "WriteFileTool",
+        args: {"filePath": "/path/to/file.txt", "content": "Hello, World!"}
+    }],
+}`;
+
+async function callGemini(prompt: string): Promise<string> {
+    const genai = new GoogleGenAI({ apiKey: setKeys.gemini });
+    const toolCalls: any[] = [];
+    let initialPrompt = true;
+    let finalPrompt = prompt;
+    let response = "";
+
+    while (toolCalls.length > 0 || initialPrompt) {
+        initialPrompt = false;
+
+        if (toolCalls.length > 0) {
+            const toolCallResults = await Promise.all(toolCalls.map(tc => runTool(tc)));
+            toolCalls.length = 0;
+            finalPrompt += `\nTool call results: ${JSON.stringify(toolCallResults)}\nBased on the above tool call results, answer the original question.`;
+        }
+
+        const responseStream = await genai.models.generateContentStream({
+            model: defaultProvider.model,
+            contents: finalPrompt,
+        });
+
+        response = "";
+        for await (const part of responseStream) {
+            response += part.text;
+        }
+
+        const isJson = response.trim().startsWith("{") && response.trim().endsWith("}");
+        const parsed = isJson ? JSON.parse(response) : null;
+
+        if (parsed?.tools) {
+            toolCalls.push(...parsed.tools);
+            finalPrompt = `prev context - ${finalPrompt}\nYou responded with: ${response}\nIf you need to call any tools use this format:\n${toolExamples}\nonly respond with json tools array, no other text.`;
+        } else if (parsed?.appendSummary) {
+            appendSummary(parsed.appendSummary);
+        }
+    }
+
+    return response;
 }
 
-interface SearchResult {
-    title: string;
-    link: string;
-    snippet: string;
+export async function callLlm(userMessage: string): Promise<string> {
+    pushMessage("user", userMessage);
+
+    const prompt = `You are a helpful coding assistant. Use the following tools when needed: ${toolDescriptions}.
+If you use a tool, respond ONLY with json in this format: {tools: [{ "name": "<tool_name>", "args": { <args> } }]}
+tool examples:
+${toolExamples}
+
+otherwise, respond with a helpful answer to the user's message formatted as follows:
+{
+    "thoughts": "your reasoning about the user request and what files need to be updated",
+    "appendSummary": "a concise summary of the changes made and the current state of the project after this update, and make sure don't repeat existing summery i'll just append this to the existing summery and use it as context for future interactions, and if no changes were made, stay silent and don't include this field in your response"
 }
 
-interface WebSearchResponse {
-    organic_results?: Array<{
-        title: string;
-        link: string;
-        snippet: string;
-    }>;
-}
+Previous summary:
+${getSummary() || "No conversation yet."}
 
-interface SuccessResponse {
-    ok: true;
-    result: SearchResult[] | string;
-}
+Message history:
+${getFormattedHistory()}
 
-interface ErrorResponse {
-    ok: false;
-    error: string;
-}
+User message: ${userMessage}`;
 
-type WebSearchResult = SuccessResponse | ErrorResponse;
-
-const tools: Tool[] = [{
-    name: "WebSearch",
-    description: "Search on the web for up-to-date information.",
-    args: [{
-        name: "query",
-        type: "string",
-        description: "The search query."
-    }]
-}];
-
-export async function callLlm(prompt: string): Promise<void> {
-    prompt = prompt;
-    let finalPrompt = `You are a helpful coding assistant. Use the following tool when needed: ${tools.map(t => `${t.name}: ${t.description} : ${t.args.map(a => `${a.name}: ${a.type}`).join(", ")}`).join("; ")}. Always use tools when you think they can help you get the right answer. If you use a tool, use the following format: {tools: [{ "name": "<tool_name>", "args": { <args> } }]}. Here is user asked: ${prompt}
-            tool examples:
-            {
-                tools: [{
-                    name: "WebSearch",
-                    args: {"query": "What is the capital of France?"}
-                }, {
-                    name: "Tool2",
-                    args: {"arg1": "value1", "arg2": "value2"}
-                }],
-            }, 
-            if you are using a tool, then only respond with json, tools array with the format mentioned above, do not include any other text in your response. If you are not using any tool, then respond with the answer to the question without mentioning anything about tools.
-            `;
+    let response = "";
 
     if (defaultProvider.name === "gemini") {
-        const genai = new GoogleGenAI({
-            apiKey: setKeys.gemini
-        });
-        const toolCalls = [];
-        let initialPrompt = true;
-
-        let response = "";
-        while (toolCalls.length > 0 || initialPrompt) {
-            initialPrompt = false;
-            const toolCallResults = [];
-
-            if (toolCalls.length > 0) {
-                for (const toolCall of toolCalls) {
-                    console.log("Processing tool call:", toolCall);
-                    if (toolCall.name === "WebSearch") {
-                        const args = toolCall.args;
-                        const searchResult = await WebSearch(args.query);
-                        console.log("WebSearch result:", searchResult);
-                        toolCallResults.push({
-                            tool: "WebSearch",
-                            args,
-                            result: searchResult
-                        });
-                    } else {
-                        console.log(`Unknown tool: ${toolCall.name}`);
-                    }
-                }
-
-                if (toolCallResults.length > 0) {
-                    finalPrompt += `\nTool call results: ${JSON.stringify(toolCallResults)}\nBased on the above tool call results, answer the original question: ${prompt}`;
-                }
-            }
-            const responseStream = await genai.models.generateContentStream({
-                model: defaultProvider.model,
-                contents: finalPrompt, // You can format this prompt as needed
-            })
-
-            for await (const part of responseStream) {
-                response += part.text;
-                console.log(part.text);
-                // await new Promise(resolve => setTimeout(resolve, 1000)); // Simulate streaming delay
-            }
-
-            const isJson = response.trim().startsWith("{") && response.trim().endsWith("}");
-
-            const parsedResponse = isJson ? JSON.parse(response) : null;
-            if (parsedResponse && parsedResponse.tools) {
-                toolCalls.push(...parsedResponse.tools);
-            } else {
-                toolCalls.length = 0; // Clear tool calls to exit loop if response is not a tool call
-            }
-            finalPrompt = `prev context - ${finalPrompt}\nYou responded with: ${response}\nIf you need to call any tools to answer the question then use this format
-            tool examples:
-            {
-            tools: [{
-                name: "WebSearch",
-                args: {"query": "What is the capital of France?"}
-            }, {
-                name: "Tool2",
-                args: {"arg1": "value1", "arg2": "value2"}
-            }]
-        }
-            if you are using a tool, then only respond with json tools array with the format mentioned above, do not include any other text in your response. If you are not using any tool, then respond with the answer to the question without mentioning anything about tools.
-            `;
-        }
-
-        return;
+        response = await callGemini(prompt);
+    } else {
+        throw new Error(`Unsupported provider: ${defaultProvider.name}`);
     }
 
-    throw new Error(`Unsupported provider: ${defaultProvider.name}`);
-}
+    pushMessage("assistant", response);
 
-async function WebSearch(query: string): Promise<WebSearchResult> {
-    try {
-        const { getJson: serpWebSearch } = require("serpapi");
-        const response: WebSearchResponse = await serpWebSearch({
-            engine: "google",
-            api_key: process.env.SERP_API_KEY, // must be defined
-            q: query
-        });
-
-        const results = response.organic_results || [];
-
-        const formatted: SearchResult[] = results.slice(0, 3).map(r => ({
-            title: r.title,
-            link: r.link,
-            snippet: r.snippet
-        }));
-
-        return {
-            ok: true,
-            result: formatted.length ? formatted : "No results found"
-        };
-
-    } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        console.log("Error in WebSearchTool:", message);
-
-        return {
-            ok: false,
-            error: message
-        };
+    // append summary if LLM returned one
+    const isJson = response.trim().startsWith("{") && response.trim().endsWith("}");
+    if (isJson) {
+        const parsed = JSON.parse(response);
+        if (parsed.appendSummary) {
+            appendSummary(parsed.appendSummary);
+        }
     }
+
+    // compress summary when it grows too long
+    if (getSummary().length > SUMMARY_COMPRESS_THRESHOLD) {
+        const summaryResponse = await (defaultProvider.name === "gemini"
+            ? callGemini(generateSummeryGenerationPrompt())
+            : Promise.reject(new Error("Unsupported provider")));
+        const parsed = JSON.parse(summaryResponse);
+        replaceSummary(parsed.newSummary);
+        console.log("New Summary after summarization:", parsed.newSummary);
+    }
+
+    return response;
 }
