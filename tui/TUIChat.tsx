@@ -44,7 +44,7 @@ export function TUIChat(props: TUIChatProps): React.ReactElement {
 
   return (
     <Box flexDirection="column">
-      <Text color="green">opencode TUI Chat</Text>
+      <Text color="green">Deva TUI Chat</Text>
       <Text dimColor>Press Esc to exit</Text>
 
       <Box flexDirection="column" marginTop={1}>

@@ -1,7 +1,7 @@
 import { GoogleGenAI } from "@google/genai";
 import OpenAI from "openai";
 import { defaultProvider, setKeys } from "../store/db";
-import { tools, runTool } from "./tools";
+import { tools, runTool, ToolState, getRunnableTools } from "./tools";
 import {
     pushMessage,
     appendSummary,
@@ -11,47 +11,61 @@ import {
     generateSummeryGenerationPrompt,
 } from "./memory";
 
-const SUMMARY_COMPRESS_THRESHOLD = 30;
+const SUMMARY_COMPRESS_THRESHOLD = 3000;
 
 const toolDescriptions = tools.map(t =>
     `${t.name}: ${t.description} : ${t.args.map(a => `${a.name}: ${a.type}`).join(", ")}`
 ).join("; ");
 
 const toolExamples = `{
-    "tools": [{
-        "name": "WebSearch",
-        "args": {"query": "What is the capital of France?"}
-    }, {
-        "name": "BashTool",
-        "args": {"command": "ls -la"}
-    }, {
-        "name": "ReadFileTool",
-        "args": {"filePath": "/path/to/file.txt"}
-    }, {
-        "name": "WriteFileTool",
-        "args": {"filePath": "/path/to/file.txt", "content": "import express from 'express';
-        const app = express();
-        app.get('/', (req, res) => {
-            res.send('Hello World!');
-        });
-        app.listen(3000, () => {
-            console.log('Server is running on port 3000');
-        });"}
-    }, {
-        "name": "updateFileContent",
-        "args": {"filePath": "/path/to/file.txt", "startLine": 4, "endLine": 6, "newContent": "const count = 5;
-        array.forEach(item, idx => {
-            if (idx === count) {
-                console.log('Reached the count limit.');
-            }
-            console.log(item);
-        });"}
-    }],
+  "tools": [
+    {
+      "name": "WebSearch",
+      "args": {"query": "What is the capital of France?"},
+      "dependsOn": []
+    },
+    {
+      "name": "BashTool",
+      "args": {"command": "ls -la"},
+      "dependsOn": [0]
+    },
+    {
+      "name": "ReadFileTool",
+      "args": {"filePath": "/path/to/file.txt"},
+      "dependsOn": [0, 1]
+    },
+    {
+      "name": "WriteFileTool",
+      "args": {
+        "filePath": "/path/to/file.txt",
+        "content": "import express from 'express';\nconst app = express();\napp.get('/', (req, res) => {\n  res.send('Hello World!');\n});\napp.listen(3000, () => {\n  console.log('Server is running on port 3000');\n});"
+      },
+      "dependsOn": [0, 1, 2]
+    },
+    {
+      "name": "updateFileContent",
+      "args": {
+        "filePath": "/path/to/file.txt",
+        "startLine": 4,
+        "endLine": 6,
+        "newContent": "const count = 5;\narray.forEach((item, idx) => {\n  if (idx === count) {\n    console.log('Reached the count limit.');\n  }\n  console.log(item);\n});"
+      },
+      "dependsOn": [0, 1, 2]
+    },
+    {
+      "name": "runAgentTool",
+      "args": {
+        "agentId": "agent_123",
+        "prompt": "Please analyze the project and provide a summary of the current state."
+      },
+      "dependsOn": []
+    }
+  ]
 }`;
 
 async function callGemini(systemPrompt: string, userMessage: string): Promise<string> {
     const genai = new GoogleGenAI({ apiKey: setKeys.gemini });
-    const toolCalls: any[] = [];
+    const toolCalls: ToolCalls[] = [];
     let initialPrompt = true;
     let finalPrompt = `${systemPrompt}\nUser message: ${userMessage}`;
     let response = "";
@@ -93,9 +107,15 @@ async function callGemini(systemPrompt: string, userMessage: string): Promise<st
     return response;
 }
 
+export interface ToolCalls {
+    name: string;
+    args: Record<string, any>;
+    dependsOn?: number[];
+}
+
 async function callOpenAI(systemPrompt: string, userMessage: string): Promise<string> {
     const openai = new OpenAI({ apiKey: setKeys.openai });
-    const toolCalls: any[] = [];
+    const toolCalls: ToolCalls[] = [];
     let initialPrompt = true;
     let finalPrompt = systemPrompt;
     let response = "";
@@ -104,28 +124,94 @@ async function callOpenAI(systemPrompt: string, userMessage: string): Promise<st
         initialPrompt = false;
 
         if (toolCalls.length > 0) {
-            const toolCallResults = await Promise.all(toolCalls.map(tc => runTool(tc)));
+            const toolStates: ToolState[] = toolCalls.map(tc => {
+                return {
+                    tool: tc,
+                    dependencies: tc.dependsOn || [],
+                    lastRunResult: undefined,
+                    toolExecution: "idle" as const,
+                };
+            });
+            while (toolStates.some(ts => ts.toolExecution === "idle" && toolStates[0] !== "__retry__" as any)) {
+                const runnableTools = getRunnableTools(toolStates);
+                await Promise.all(runnableTools.map(toolCall => {
+                    return runTool(toolCall).then(result => {
+                        const toolState = toolStates.find(ts => ts.tool === toolCall);
+                        if (toolState && result.result !== undefined) {
+                            toolState.toolExecution = "completed";
+                            toolState.lastRunResult = result;
+                        } else if (toolState && result.error) {
+                            toolState.toolExecution = "error";
+                            toolState.lastRunResult = result;
+                        }
+                    }).catch(err => {
+                        const toolState = toolStates.find(ts => ts.tool === toolCall);
+                        if (toolState) {
+                            toolState.toolExecution = "error";
+                            toolState.lastRunResult = err;
+                        }
+                    });
+                }));
+            }
+            if (toolStates[0] !== "__retry__" as any) {
+                const toolCallResults = toolStates.map(ts => ts.lastRunResult);
+                finalPrompt += `\nTool call results: ${JSON.stringify(toolCallResults)}\nBased on the above tool call results, answer the original question.`;
+            }
             toolCalls.length = 0;
-            finalPrompt += `\nTool call results: ${JSON.stringify(toolCallResults)}\nBased on the above tool call results, answer the original question.`;
         }
 
-        const responseStream = await openai.chat.completions.create({
-            model: defaultProvider.model,
-            messages: [{ role: "user", content: userMessage }, { role: "system", content: finalPrompt }],
-            stream: true
-        });
+        let responseStream;
+        if (defaultProvider.model === "local") {
+            // const extraPrompt = `\nIf you need to call any tools use this format:\n${toolExamples}\nonly respond with json tools array, no other text.`;
+            responseStream = await fetch("http://localhost:8080/chat", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ prompt: finalPrompt + "\nUser message: " + userMessage }),
+            }) as any;
+        } else {
+            responseStream = await openai.chat.completions.create({
+                model: defaultProvider.model,
+                messages: [{ role: "user", content: userMessage }, { role: "system", content: finalPrompt }],
+                stream: true
+            });
+        }
 
         response = "";
-        for await (const part of responseStream) {
-            response += part.choices[0].delta.content || "";
+        if (defaultProvider.model === "local") {
+            for await (const chunk of responseStream.body) {
+                const data = JSON.parse(new TextDecoder().decode(chunk));
+                console.log(data.text);
+                response += data.text;
+            }
+        } else {
+            for await (const part of responseStream) {
+                response += part.choices[0].delta.content || "";
+            }
         }
 
         // remove ```json and ``` if present
-        response = response.replace(/```json/g, "").replace(/```/g, "").trim().replace(/,(\s*[}\]])/g, "$1");
-        console.log("Raw response from OpenAI:", response);
+        response = response
+            .replace(/```json/g, "")
+            .replace(/```/g, "")
+            .trim()
+            .replace(/,(\s*[}\]])/g, "$1")
+            .replace(/\\(?!["\\/bfnrtu])/g, "/")
+            // escape unescaped double quotes inside string values
+            .replace(/("command"\s*:\s*")(.*?)("(?:\s*[,}]))/gs, (_, key, val, end) =>
+                key + val.replace(/(?<!\\)"/g, '\\"') + end
+            );
 
         const isJson = response.trim().startsWith("{") && response.trim().endsWith("}");
-        const parsed = isJson ? JSON.parse(response.trim()) : null;
+        let parsed: any = null;
+        try {
+            parsed = isJson ? JSON.parse(response.trim()) : null;
+        } catch (error) {
+            // ask the model to fix its own output
+            const errMsg = error instanceof Error ? error.message : String(error);
+            finalPrompt += `\nYour last response was invalid JSON. Error: ${errMsg}\nResponse was: ${response}\nFix it and respond with valid JSON only.`;
+            toolCalls.push("__retry__" as any);
+            continue;
+        }
 
         if (parsed?.tools) {
             toolCalls.push(...parsed.tools);
@@ -135,11 +221,10 @@ async function callOpenAI(systemPrompt: string, userMessage: string): Promise<st
         }
     }
 
-    console.log("Final response from OpenAI:", response);
     return response;
 }
 
-export async function callLlm(userMessage: string): Promise<string> {
+export async function callLlm(userMessage: string, options?: { agentId: string; agentMode: string }): Promise<string> {
     pushMessage("user", userMessage);
 
     const systemPrompt = `
@@ -225,6 +310,16 @@ Do NOT skip steps. Do NOT respond with an answer before completing all tool call
 - NEVER say a file was updated unless WriteFileTool was actually called with real code content.
 - NEVER put answer text or summary text into file content. File content must be real, valid code only.
 - NEVER assume a tool worked. Always verify by reading the file back after writing.
+- NEVER use double quotes inside argument values. Use single quotes for shell commands instead.
+  WRONG: {"command": "cd "my-folder" && npm start"}
+  RIGHT: {"command": "cd 'my-folder' && npm start"}
+- NEVER use Windows backslashes in file paths. Always use forward slashes.
+  WRONG: "D:\class\tui-starter\projects"
+  RIGHT: "D:/class/tui-starter/projects"
+- NEVER use double quotes inside bash command strings, even around variables. Use single quotes only.
+  WRONG: if [ -n "$PROJECT" ]; then cd "$PROJECT"
+  RIGHT: if [ -n '$PROJECT' ]; then cd '$PROJECT'
+- Keep bash commands simple and short. Avoid complex multi-command chains with variables.
 
 ---
 
@@ -262,13 +357,21 @@ ${getFormattedHistory()}`;
     let response = "";
 
     if (defaultProvider.name === "gemini") {
+        if (options?.agentMode === "tool") {
+            response = await callGemini(userMessage, "");
+        } else {
+            response = await callGemini(systemPrompt, userMessage);
+        }
         response = await callGemini(systemPrompt, userMessage);
     } else if (defaultProvider.name === "openai") {
-        response = await callOpenAI(systemPrompt, userMessage);
+        if (options?.agentMode === "tool") {
+            response = await callOpenAI(userMessage, "");
+        } else {
+            response = await callOpenAI(systemPrompt, userMessage);
+        }
     } else {
         throw new Error(`Unsupported provider: ${defaultProvider.name}`);
     }
-
     pushMessage("assistant", response);
 
     // append summary if LLM returned one
@@ -287,7 +390,6 @@ ${getFormattedHistory()}`;
                 : Promise.reject(new Error("Unsupported provider")));
         const parsed = JSON.parse(summaryResponse);
         replaceSummary(parsed.newSummary);
-        console.log("New Summary after summarization:", parsed.newSummary);
     }
 
     return parsed?.answer || response;

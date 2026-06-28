@@ -23,8 +23,10 @@ export function getSummary(): string {
     return summeryMemory;
 }
 
+const HistoryLimit = 20;
+
 export function getFormattedHistory(): string {
-    return messageHistory.map(m => {
+    return messageHistory.slice(-HistoryLimit).map(m => {
         if (m.role === "assistant") {
             try {
                 const parsed = JSON.parse(m.content);

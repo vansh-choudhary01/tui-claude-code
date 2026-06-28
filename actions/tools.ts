@@ -1,5 +1,7 @@
 import { ChildProcess, exec, spawn } from "child_process";
 import fs from "fs/promises";
+import { callLlm, ToolCalls } from "./llm";
+import { randomUUID } from "crypto";
 
 interface WebSearchResponse {
     organic_results?: Array<{
@@ -45,7 +47,8 @@ export type ToolCall = {
 export type ToolRunResult = {
     tool: string;
     args: Record<string, any>;
-    result: unknown;
+    result?: unknown;
+    error?: string;
 };
 
 export const tools: Tool[] = [
@@ -104,6 +107,18 @@ export const tools: Tool[] = [
             name: "newContent",
             type: "string",
             description: "The new content to insert."
+        }]
+    }, {
+        name: "runAgentTool",
+        description: "Run an agent with a specific prompt and get the result.",
+        args: [{
+            name: "agentId",
+            type: "string",
+            description: "The ID of the agent to run."
+        }, {
+            name: "prompt",
+            type: "string",
+            description: "The prompt to give the agent."
         }]
     }
 ];
@@ -262,13 +277,21 @@ export async function UpdateFileContentTool(filePath: string, startLine: number,
     await fs.writeFile(fullFilePath, lines.join("\n"), "utf8");
 }
 
+// create agent tool (that run an task and response back with result and with summery what it did (means thoughts))
+export async function runAgentTool(agentId: string, prompt: string): Promise<string> {
+    return await callLlm(prompt, {
+        agentId,
+        agentMode: "tool",
+    });
+}
+
 export async function runTool(toolCall: ToolCall): Promise<ToolRunResult> {
     console.log("Running tool:", toolCall);
     try {
         const args = toolCall.args ?? {};
 
         if (toolCall.name === "WebSearch") {
-            return {
+            return { 
                 tool: toolCall.name,
                 args,
                 result: await WebSearch(String(args.query ?? ""))
@@ -314,6 +337,14 @@ export async function runTool(toolCall: ToolCall): Promise<ToolRunResult> {
             };
         }
 
+        if (toolCall.name === "runAgentTool") {
+            return {
+                tool: toolCall.name,
+                args,
+                result: await runAgentTool(String(args.agentId ?? randomUUID()), String(args.prompt ?? ""))
+            };
+        }
+
         return {
             tool: toolCall.name,
             args,
@@ -323,7 +354,20 @@ export async function runTool(toolCall: ToolCall): Promise<ToolRunResult> {
         return {
             tool: toolCall.name,
             args: toolCall.args,
-            result: `Error executing tool: ${error instanceof Error ? error.message : String(error)}`
+            error: error instanceof Error ? error.message : String(error)
         };
     }
+}
+
+export interface ToolState {
+    tool: ToolCalls;
+    dependencies: number[]; // indices of tools that must be completed before this tool can run
+    lastRunResult?: ToolRunResult;
+    toolExecution: "idle" | "running" | "completed" | "error";
+}
+
+export function getRunnableTools(toolStates: ToolState[]): ToolCalls[] {
+    return toolStates
+        .filter((state): state is ToolState => state.toolExecution === "idle" && state.dependencies.every(depIndex => toolStates[depIndex]?.toolExecution === "completed"))
+        .map((state) => state.tool);
 }
