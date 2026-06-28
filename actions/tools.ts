@@ -279,7 +279,7 @@ export async function UpdateFileContentTool(filePath: string, startLine: number,
 
 // create agent tool (that run an task and response back with result and with summery what it did (means thoughts))
 export async function runAgentTool(agentId: string, prompt: string): Promise<string> {
-    return await callLlm(prompt, {
+    return await callLlm(prompt, () => {}, {
         agentId,
         agentMode: "tool",
     });

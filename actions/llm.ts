@@ -63,7 +63,7 @@ const toolExamples = `{
   ]
 }`;
 
-async function callGemini(systemPrompt: string, userMessage: string): Promise<string> {
+async function callGemini(systemPrompt: string, userMessage: string, chunkFun: (chunk: string) => void): Promise<string> {
     const genai = new GoogleGenAI({ apiKey: setKeys.gemini });
     const toolCalls: ToolCalls[] = [];
     let initialPrompt = true;
@@ -86,6 +86,7 @@ async function callGemini(systemPrompt: string, userMessage: string): Promise<st
 
         response = "";
         for await (const part of responseStream) {
+            chunkFun(part.text as string);
             response += part.text;
         }
 
@@ -113,7 +114,7 @@ export interface ToolCalls {
     dependsOn?: number[];
 }
 
-async function callOpenAI(systemPrompt: string, userMessage: string): Promise<string> {
+async function callOpenAI(systemPrompt: string, userMessage: string, chunkFun: (chunk: string) => void): Promise<string> {
     const openai = new OpenAI({ apiKey: setKeys.openai });
     const toolCalls: ToolCalls[] = [];
     let initialPrompt = true;
@@ -166,7 +167,10 @@ async function callOpenAI(systemPrompt: string, userMessage: string): Promise<st
             responseStream = await fetch("http://localhost:8080/chat", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ prompt: finalPrompt + "\nUser message: " + userMessage }),
+                body: JSON.stringify({ prompt: finalPrompt + "\nUser message: " + userMessage, provider: "deepseek", metadata: { // provider: "chatgpt" | "deepseek"        
+                    modelType: "instant", // "instant" | "reasoning" | "vision"
+                    allowedTools: ["Search"] // "Search", "DeepThink"
+                } }),
             }) as any;
         } else {
             responseStream = await openai.chat.completions.create({
@@ -180,11 +184,12 @@ async function callOpenAI(systemPrompt: string, userMessage: string): Promise<st
         if (defaultProvider.model === "local") {
             for await (const chunk of responseStream.body) {
                 const data = JSON.parse(new TextDecoder().decode(chunk));
-                console.log(data.text);
+                chunkFun(data.text);
                 response += data.text;
             }
         } else {
             for await (const part of responseStream) {
+                chunkFun(part.choices[0].delta.content || "");
                 response += part.choices[0].delta.content || "";
             }
         }
@@ -224,7 +229,7 @@ async function callOpenAI(systemPrompt: string, userMessage: string): Promise<st
     return response;
 }
 
-export async function callLlm(userMessage: string, options?: { agentId: string; agentMode: string }): Promise<string> {
+export async function callLlm(userMessage: string, chunk: (chunk: string) => void, options?: { agentId: string; agentMode: string }): Promise<string> {
     pushMessage("user", userMessage);
 
     const systemPrompt = `
@@ -358,16 +363,16 @@ ${getFormattedHistory()}`;
 
     if (defaultProvider.name === "gemini") {
         if (options?.agentMode === "tool") {
-            response = await callGemini(userMessage, "");
+            response = await callGemini(userMessage, "", chunk);
         } else {
-            response = await callGemini(systemPrompt, userMessage);
+            response = await callGemini(systemPrompt, userMessage, chunk);
         }
-        response = await callGemini(systemPrompt, userMessage);
+        // response = await callGemini(systemPrompt, userMessage, chunk);
     } else if (defaultProvider.name === "openai") {
         if (options?.agentMode === "tool") {
-            response = await callOpenAI(userMessage, "");
+            response = await callOpenAI(userMessage, "", chunk);
         } else {
-            response = await callOpenAI(systemPrompt, userMessage);
+            response = await callOpenAI(systemPrompt, userMessage, chunk);
         }
     } else {
         throw new Error(`Unsupported provider: ${defaultProvider.name}`);
@@ -383,13 +388,15 @@ ${getFormattedHistory()}`;
 
     // compress summary when it grows too long
     if (getSummary().length > SUMMARY_COMPRESS_THRESHOLD) {
+        chunk(" ---- Compressing conversation history ...");
         const summaryResponse = await (defaultProvider.name === "gemini"
-            ? callGemini(generateSummeryGenerationPrompt(), "")
+            ? callGemini(generateSummeryGenerationPrompt(), "", () => {})
             : defaultProvider.name === "openai"
-                ? callOpenAI(generateSummeryGenerationPrompt(), "")
-                : Promise.reject(new Error("Unsupported provider")));
+                ? callOpenAI(generateSummeryGenerationPrompt(), "", () => {})
+                : Promise.reject(new Error("Unsupported provider")))
         const parsed = JSON.parse(summaryResponse);
         replaceSummary(parsed.newSummary);
+        chunk(" --- Done. ---");
     }
 
     return parsed?.answer || response;
