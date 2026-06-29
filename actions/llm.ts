@@ -17,21 +17,22 @@ const toolDescriptions = tools.map(t =>
     `${t.name}: ${t.description} : ${t.args.map(a => `${a.name}: ${a.type}`).join(", ")}`
 ).join("; ");
 
-const toolExamples = `{
+const toolExamples = `// Example 1: normal tool usage
+{
   "tools": [
     {
       "name": "WebSearch",
-      "args": {"query": "What is the capital of France?"},
+      "args": { "query": "What is the capital of France?" },
       "dependsOn": []
     },
     {
       "name": "BashTool",
-      "args": {"command": "ls -la"},
+      "args": { "command": "ls -la" },
       "dependsOn": [0]
     },
     {
       "name": "ReadFileTool",
-      "args": {"filePath": "/path/to/file.txt"},
+      "args": { "filePath": "/path/to/file.txt" },
       "dependsOn": [0, 1]
     },
     {
@@ -43,7 +44,15 @@ const toolExamples = `{
       "dependsOn": [0, 1, 2]
     },
     {
-      "name": "updateFileContent",
+      "name": "WriteFileTool",
+      "args": {
+        "filePath": "todo-list-react/package.json",
+        "content": "{\n  \"name\": \"todo-list-react\",\n  \"version\": \"1.0.0\",\n  \"private\": true,\n  \"dependencies\": {\n    \"react\": \"^18.2.0\",\n    \"react-dom\": \"^18.2.0\",\n    \"react-scripts\": \"5.0.1\"\n  },\n  \"scripts\": {\n    \"start\": \"react-scripts start\",\n    \"build\": \"react-scripts build\"\n  },\n  \"eslintConfig\": {\n    \"extends\": [\n      \"react-app\"\n    ]\n  },\n  \"browserslist\": {\n    \"production\": [\n      \">0.2%\",\n      \"not dead\",\n      \"not op_mini all\"\n    ],\n    \"development\": [\n      \"last 1 chrome version\",\n      \"last 1 firefox version\",\n      \"last 1 safari version\"\n    ]\n  }\n}"
+      },
+      "dependsOn": [0, 1, 2]
+    },
+    {
+      "name": "UpdateFileContentTool",
       "args": {
         "filePath": "/path/to/file.txt",
         "startLine": 4,
@@ -61,7 +70,16 @@ const toolExamples = `{
       "dependsOn": []
     }
   ]
-}`;
+}
+
+// Example 2: error recovery — command fails once → immediately WebSearch, do NOT retry same command
+// User: "run my react todo app"
+// Step 1 — try it:
+{ "tools": [{ "name": "BashTool", "args": { "command": "cd todo-list-react && npm start" } }] }
+// Result: "The system cannot find the path specified"
+// Step 2 — if you stuck in loop or don't understand why it's happening then STOP, search the error:
+{ "tools": [{ "name": "WebSearch", "args": { "query": "Windows cmd system cannot find path specified cd npm start" } }] }
+// Step 3 — apply fix from search result and proceed.`;
 
 async function callGemini(systemPrompt: string, userMessage: string, chunkFun: (chunk: string) => void): Promise<string> {
     const genai = new GoogleGenAI({ apiKey: setKeys.gemini });
@@ -91,7 +109,15 @@ async function callGemini(systemPrompt: string, userMessage: string, chunkFun: (
         }
 
         // remove ```json and ``` if present
-        response = response.replace(/```json/g, "").replace(/```/g, "").trim().replace(/,(\s*[}\]])/g, "$1");
+        response = response
+            .replace(/```json/g, "")
+            .replace(/```/g, "")
+            .trim()
+            .replace(/,(\s*[}\]])/g, "$1")
+            .replace(/\\(?!["\\/bfnrtu])/g, "/")
+            .replace(/("(?:command|content|newContent)"\s*:\s*")(.*?)("(?:\s*[,}]))/gs, (_, key, val, end) =>
+                key + val.replace(/(?<!\\)"/g, '\\"') + end
+            );
 
         const isJson = response.trim().startsWith("{") && response.trim().endsWith("}");
         const parsed = isJson ? JSON.parse(response.trim()) : null;
@@ -209,7 +235,7 @@ async function callOpenAI(systemPrompt: string, userMessage: string, chunkFun: (
             .replace(/,(\s*[}\]])/g, "$1")
             .replace(/\\(?!["\\/bfnrtu])/g, "/")
             // escape unescaped double quotes inside string values
-            .replace(/("command"\s*:\s*")(.*?)("(?:\s*[,}]))/gs, (_, key, val, end) =>
+            .replace(/("(?:command|content|newContent)"\s*:\s*")(.*?)("(?:\s*[,}]))/gs, (_, key, val, end) =>
                 key + val.replace(/(?<!\\)"/g, '\\"') + end
             );
 
@@ -336,7 +362,16 @@ Do NOT skip steps. Do NOT respond with an answer before completing all tool call
   WRONG: if [ -n "$PROJECT" ]; then cd "$PROJECT"
   RIGHT: if [ -n '$PROJECT' ]; then cd '$PROJECT'
 - Keep bash commands simple and short. Avoid complex multi-command chains with variables.
-- If you encounter an error, try to complete task in small small chunks(like if creating or updating files then try one by one) so you understand why something breaks 
+- NEVER use BashTool to create directories. WriteFileTool automatically creates parent directories. Just write the files directly.
+- If you encounter an error, try to complete task in small small chunks(like if creating or updating files then try one by one) so you understand why something breaks
+- If the same error occurs more than once, STOP retrying. Use WebSearch immediately to research the error message before attempting anything else.
+- **Escaping double quotes in 'content' and other string values**:  
+  When you write a string that contains double quotes (e.g., JSON code, CSS, HTML, or JavaScript with object literals), you **must** escape every internal double quote with a backslash ('\"').  
+  ✅ Correct:  
+  '"content": "{\\"name\\": \\"todo-list-react\\", \\"version\\": \\"1.0.0\\"}"'
+  ❌ Incorrect (breaks JSON):  
+  '"content": "{ "name": "todo-list-react" }"'
+  The entire 'content' value is a single JSON string; all inner quotes must be escaped.
 
 ---
 

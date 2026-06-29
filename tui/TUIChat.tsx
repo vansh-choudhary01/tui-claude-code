@@ -1,53 +1,51 @@
-import React, { useState } from "react";
+import React, { useState, useRef } from "react";
 import { Box, Text, useInput } from "ink";
 import TextInput from "ink-text-input";
-import Spinner from "ink-spinner";
+// Using a simple emoji instead of ink-spinner to avoid incompatible JSX types
 import { callLlm } from "../actions/llm";
-
-interface TUIChatProps {}
 
 type Message = {
   role: "user" | "assistant";
   content: string;
 };
 
-export function TUIChat(props: TUIChatProps): React.ReactElement {
-  const [input, setInput] = useState<string>("");
+export function TUIChat(): React.ReactElement {
+  const [input, setInput] = useState("");
   const [messages, setMessages] = useState<Message[]>([]);
-  const [loading, setLoading] = useState<boolean>(false);
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [chunks, setChunks] = useState<number>();
+  const [chunks, setChunks] = useState(0);
+  const [thinkingText, setThinkingText] = useState(""); // accumulates chunks
 
-  useInput((input, key) => {
-    if (key.escape) {
-      process.exit(0);
-    }
+  useInput((_, key) => {
+    if (key.escape) process.exit(0);
   });
 
   async function handleSubmit(value: string) {
     if (!value.trim() || loading) return;
 
-    // Add user message immediately
-    const userMessage: Message = { role: "user", content: value };
-    setMessages((prev) => [...prev, userMessage]);
+    // Add user message
+    setMessages((prev) => [...prev, { role: "user", content: value }]);
     setInput("");
     setLoading(true);
     setError(null);
+    setChunks(0);
+    setThinkingText("");
 
     try {
-      const assistantMessage: Message = {
-        role: "assistant",
-        content: '',
-      };
-      setChunks(0);
-      setMessages((prev) => [...prev, assistantMessage]);
-      const llmResponse = await callLlm(value, (chunk: string) => {
-        setChunks(prev => (prev || 0) + 1)
-        assistantMessage.content += chunk;
+      // Stream chunks, append to thinkingText
+      const response = await callLlm(value, (chunk: string) => {
+        setChunks((prev) => prev + 1);
+        setThinkingText((prev) => prev + chunk);
       });
-      assistantMessage.content = llmResponse;
+
+      // After stream finishes, add the final assistant message
+      setMessages((prev) => [
+        ...prev,
+        { role: "assistant", content: response },
+      ]);
+      setThinkingText(""); // clear thinking area
     } catch (err) {
-      console.log(err)
       setError(err instanceof Error ? err.stack as string : "Something went wrong");
     } finally {
       setLoading(false);
@@ -58,35 +56,39 @@ export function TUIChat(props: TUIChatProps): React.ReactElement {
     <Box flexDirection="column" padding={1}>
       {/* Header */}
       <Box borderStyle="round" borderColor="green" paddingX={1}>
-        <Text color="green" bold>
-          🧠 Claude Code
-        </Text>
+        <Text color="green" bold>🧠 Claude Code</Text>
       </Box>
       <Text dimColor>Press Esc to exit</Text>
 
       {/* Messages */}
       <Box flexDirection="column" marginTop={1} marginBottom={1}>
-        {messages.map((msg, index) => (
-          <Box key={index} marginBottom={1}>
+        {messages.map((msg, idx) => (
+          <Box key={idx} marginBottom={1}>
             <Text color={msg.role === "user" ? "cyan" : "yellow"}>
-              {msg.role === "user" ? "You" : "Claude"}
-              {": "}
+              {msg.role === "user" ? "You" : "Claude"}:{" "}
             </Text>
             <Text>{msg.content}</Text>
           </Box>
         ))}
-        {chunks !== undefined && chunks > 0 && (
-          <Box marginBottom={1}>
-            <Text color="blue">Received {chunks} chunks</Text>
-          </Box>
-        )}
+
+        {/* Thinking area (only shown while loading) */}
         {loading && (
-          <Box marginBottom={1}>
-            <Text color="yellow">
-              <Spinner type="dots" /> Claude is thinking...
-            </Text>
+          <Box marginBottom={1} flexDirection="column">
+            <Box>
+              <Text color="yellow">
+                ⏳ Thinking
+                {chunks > 0 && ` (${chunks} chunks received)`}
+              </Text>
+            </Box>
+            {thinkingText && (
+              <Box paddingLeft={2}>
+                <Text dimColor>{thinkingText}</Text>
+              </Box>
+            )}
           </Box>
         )}
+
+        {/* Error */}
         {error && (
           <Box marginBottom={1}>
             <Text color="red">⚠️ {error}</Text>
@@ -94,10 +96,10 @@ export function TUIChat(props: TUIChatProps): React.ReactElement {
         )}
       </Box>
 
-      {/* Input separator */}
+      {/* Separator */}
       <Box borderStyle="single" borderColor="gray" marginBottom={1} />
 
-      {/* Input line */}
+      {/* Input */}
       <Box>
         <Text color="green">{"> "}</Text>
         <TextInput

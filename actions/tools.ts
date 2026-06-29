@@ -167,6 +167,17 @@ const runningProcesses = new Map<number, RunningProcess>();
 const pwd = process.cwd() + "/.agent_workspace/projects";
 
 export async function BashTool(command: string) {
+    // Handle "cd <dir> && <cmd>" — on Windows, cd in a spawned shell doesn't persist.
+    // Extract the subdir and run the actual command with cwd set to it instead.
+    let cwd = pwd;
+    // let actualCommand = command;
+    // const cdMatch = command.match(/^cd\s+['"]?([^'"&]+?)['"]?\s*&&\s*(.+)$/);
+    // if (cdMatch) {
+    //     const subDir = cdMatch[1].trim().replace(/\\/g, "/");
+    //     cwd = /^([A-Za-z]:|\/)/.test(subDir) ? subDir : `${pwd}/${subDir}`;
+    //     actualCommand = cdMatch[2].trim();
+    // }
+
     return new Promise<{
         output: string;
         errorOutput: string;
@@ -175,7 +186,7 @@ export async function BashTool(command: string) {
     }>((resolve, reject) => {
 
         const child = spawn(command, {
-            cwd: pwd,
+            cwd,
             shell: true,
         });
 
@@ -262,6 +273,7 @@ export async function ReadFileTool(filePath: string): Promise<string> {
 
 export async function WriteFileTool(filePath: string, content: string): Promise<void> {
     const fullFilePath = `${pwd}/${filePath}`;
+    await fs.mkdir(require("path").dirname(fullFilePath), { recursive: true });
     await fs.writeFile(fullFilePath, content, "utf8");
 }
 
