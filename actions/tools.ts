@@ -345,6 +345,14 @@ export async function runTool(toolCall: ToolCall): Promise<ToolRunResult> {
             };
         }
 
+        if (toolCall.name === "__retry__") {
+            return {
+                tool: toolCall.name,
+                args,
+                result: "Your last response was invalid JSON."
+            }
+        }
+
         return {
             tool: toolCall.name,
             args,

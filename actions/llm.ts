@@ -133,7 +133,7 @@ async function callOpenAI(systemPrompt: string, userMessage: string, chunkFun: (
                     toolExecution: "idle" as const,
                 };
             });
-            while (toolStates.some(ts => ts.toolExecution === "idle" && toolStates[0] !== "__retry__" as any)) {
+            while (toolStates.some(ts => ts.toolExecution === "idle")) {
                 const runnableTools = getRunnableTools(toolStates);
                 await Promise.all(runnableTools.map(toolCall => {
                     return runTool(toolCall).then(result => {
@@ -154,10 +154,8 @@ async function callOpenAI(systemPrompt: string, userMessage: string, chunkFun: (
                     });
                 }));
             }
-            if (toolStates[0] !== "__retry__" as any) {
-                const toolCallResults = toolStates.map(ts => ts.lastRunResult);
-                finalPrompt += `\nTool call results: ${JSON.stringify(toolCallResults)}\nBased on the above tool call results, answer the original question.`;
-            }
+            const toolCallResults = toolStates.map(ts => ts.lastRunResult);
+            finalPrompt += `\nTool call results: ${JSON.stringify(toolCallResults)}\nBased on the above tool call results, answer the original question.`;
             toolCalls.length = 0;
         }
 
@@ -167,10 +165,12 @@ async function callOpenAI(systemPrompt: string, userMessage: string, chunkFun: (
             responseStream = await fetch("http://localhost:8080/chat", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ prompt: finalPrompt + "\nUser message: " + userMessage, provider: "deepseek", metadata: { // provider: "chatgpt" | "deepseek"        
-                    modelType: "instant", // "instant" | "reasoning" | "vision"
-                    allowedTools: ["Search"] // "Search", "DeepThink"
-                } }),
+                body: JSON.stringify({
+                    prompt: finalPrompt + "\nUser message: " + userMessage, provider: "deepseek", metadata: { // provider: "chatgpt" | "deepseek"        
+                        modelType: "instant", // "instant" | "reasoning" | "vision"
+                        allowedTools: ["Search"] // "Search", "DeepThink"
+                    }
+                }),
             }) as any;
         } else {
             responseStream = await openai.chat.completions.create({
@@ -182,10 +182,17 @@ async function callOpenAI(systemPrompt: string, userMessage: string, chunkFun: (
 
         response = "";
         if (defaultProvider.model === "local") {
+            let buffer = "";
             for await (const chunk of responseStream.body) {
-                const data = JSON.parse(new TextDecoder().decode(chunk));
-                chunkFun(data.text);
-                response += data.text;
+                buffer += new TextDecoder().decode(chunk);
+                const parts = buffer.split("\x1E");
+                buffer = parts.pop()!;
+                for (const part of parts) {
+                    if (!part.trim()) continue;
+                    const data = JSON.parse(part);
+                    chunkFun(data.text);
+                    response += data.text;
+                }
             }
         } else {
             for await (const part of responseStream) {
@@ -214,7 +221,11 @@ async function callOpenAI(systemPrompt: string, userMessage: string, chunkFun: (
             // ask the model to fix its own output
             const errMsg = error instanceof Error ? error.message : String(error);
             finalPrompt += `\nYour last response was invalid JSON. Error: ${errMsg}\nResponse was: ${response}\nFix it and respond with valid JSON only.`;
-            toolCalls.push("__retry__" as any);
+            toolCalls.push({
+                name: "__retry__",
+                args: {},
+                dependsOn: []
+            });
             continue;
         }
 
@@ -325,6 +336,7 @@ Do NOT skip steps. Do NOT respond with an answer before completing all tool call
   WRONG: if [ -n "$PROJECT" ]; then cd "$PROJECT"
   RIGHT: if [ -n '$PROJECT' ]; then cd '$PROJECT'
 - Keep bash commands simple and short. Avoid complex multi-command chains with variables.
+- If you encounter an error, try to complete task in small small chunks(like if creating or updating files then try one by one) so you understand why something breaks 
 
 ---
 
@@ -390,9 +402,9 @@ ${getFormattedHistory()}`;
     if (getSummary().length > SUMMARY_COMPRESS_THRESHOLD) {
         chunk(" ---- Compressing conversation history ...");
         const summaryResponse = await (defaultProvider.name === "gemini"
-            ? callGemini(generateSummeryGenerationPrompt(), "", () => {})
+            ? callGemini(generateSummeryGenerationPrompt(), "", () => { })
             : defaultProvider.name === "openai"
-                ? callOpenAI(generateSummeryGenerationPrompt(), "", () => {})
+                ? callOpenAI(generateSummeryGenerationPrompt(), "", () => { })
                 : Promise.reject(new Error("Unsupported provider")))
         const parsed = JSON.parse(summaryResponse);
         replaceSummary(parsed.newSummary);

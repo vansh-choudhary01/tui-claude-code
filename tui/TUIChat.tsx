@@ -45,6 +45,7 @@ export function TUIChat(props: TUIChatProps): React.ReactElement {
         setChunks(prev => (prev || 0) + 1)
         assistantMessage.content += chunk;
       });
+      assistantMessage.content = llmResponse;
     } catch (err) {
       console.log(err)
       setError(err instanceof Error ? err.stack as string : "Something went wrong");
