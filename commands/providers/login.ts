@@ -14,26 +14,3 @@ export const loginCommand = new Command("login")
             resetDb();
         }
     })
-    // .command('--provider <providerName>')
-    // .description('provider name')
-    // .action((provider) => {
-    //     console.log(provider)
-    //     if (providersList.includes(provider)) {
-    //         console.log("provider is valid")
-    //     } else {
-    //         console.log("provider is invalid")
-    //     }
-    // })
-
-// import { program } from 'commander';
-
-// program
-//   .option('--first')
-//   .option('-s, --separator <char>')
-//   .argument('<string>');
-
-// program.parse();
-
-// const options = program.opts();
-// const limit = options.first ? 1 : undefined;
-// console.log(program.args[0].split(options.separator, limit));

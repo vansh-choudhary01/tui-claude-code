@@ -291,7 +291,7 @@ export async function UpdateFileContentTool(filePath: string, startLine: number,
 
 // create agent tool (that run an task and response back with result and with summery what it did (means thoughts))
 export async function runAgentTool(agentId: string, prompt: string): Promise<string> {
-    return await callLlm(prompt, () => {}, {
+    return await callLlm(prompt, () => { }, {
         agentId,
         agentMode: "tool",
     });
@@ -303,7 +303,7 @@ export async function runTool(toolCall: ToolCall): Promise<ToolRunResult> {
         const args = toolCall.args ?? {};
 
         if (toolCall.name === "WebSearch") {
-            return { 
+            return {
                 tool: toolCall.name,
                 args,
                 result: await WebSearch(String(args.query ?? ""))
@@ -390,4 +390,9 @@ export function getRunnableTools(toolStates: ToolState[]): ToolCalls[] {
     return toolStates
         .filter((state): state is ToolState => state.toolExecution === "idle" && state.dependencies.every(depIndex => toolStates[depIndex]?.toolExecution === "completed"))
         .map((state) => state.tool);
+}
+
+// get dependant tools
+export function getDependantTools(toolStates: ToolState[], toolIndex: number): ToolState[] {
+    return toolStates.filter((_, i) => toolStates[i]?.dependencies.includes(toolIndex));
 }

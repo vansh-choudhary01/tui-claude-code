@@ -3,6 +3,7 @@ import { Box, Text, useInput } from "ink";
 import TextInput from "ink-text-input";
 // Using a simple emoji instead of ink-spinner to avoid incompatible JSX types
 import { callLlm } from "../actions/llm";
+import Spinner from "ink-spinner";
 
 type Message = {
   role: "user" | "assistant";
@@ -76,7 +77,7 @@ export function TUIChat(): React.ReactElement {
           <Box marginBottom={1} flexDirection="column">
             <Box>
               <Text color="yellow">
-                ⏳ Thinking
+                <Spinner/> Thinking
                 {chunks > 0 && ` (${chunks} chunks received)`}
               </Text>
             </Box>

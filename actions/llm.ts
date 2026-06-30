@@ -1,7 +1,7 @@
 import { GoogleGenAI } from "@google/genai";
 import OpenAI from "openai";
 import { defaultProvider, setKeys } from "../store/db";
-import { tools, runTool, ToolState, getRunnableTools } from "./tools";
+import { tools, runTool, ToolState, getRunnableTools, getDependantTools } from "./tools";
 import {
     pushMessage,
     appendSummary,
@@ -22,7 +22,7 @@ const toolExamples = `// Example 1: normal tool usage
   "tools": [
     {
       "name": "WebSearch",
-      "args": { "query": "What is the capital of France?" },
+      "args": { "query": "How to solve this type of bug - invalid json" },
       "dependsOn": []
     },
     {
@@ -81,67 +81,70 @@ const toolExamples = `// Example 1: normal tool usage
 { "tools": [{ "name": "WebSearch", "args": { "query": "Windows cmd system cannot find path specified cd npm start" } }] }
 // Step 3 — apply fix from search result and proceed.`;
 
-async function callGemini(systemPrompt: string, userMessage: string, chunkFun: (chunk: string) => void): Promise<string> {
-    const genai = new GoogleGenAI({ apiKey: setKeys.gemini });
-    const toolCalls: ToolCalls[] = [];
-    let initialPrompt = true;
-    let finalPrompt = `${systemPrompt}\nUser message: ${userMessage}`;
-    let response = "";
-
-    while (toolCalls.length > 0 || initialPrompt) {
-        initialPrompt = false;
-
-        if (toolCalls.length > 0) {
-            const toolCallResults = await Promise.all(toolCalls.map(tc => runTool(tc)));
-            toolCalls.length = 0;
-            finalPrompt += `\nTool call results: ${JSON.stringify(toolCallResults)}\nBased on the above tool call results, answer the original question.`;
-        }
-
-        const responseStream = await genai.models.generateContentStream({
-            model: defaultProvider.model,
-            contents: finalPrompt,
-        });
-
-        response = "";
-        for await (const part of responseStream) {
-            chunkFun(part.text as string);
-            response += part.text;
-        }
-
-        // remove ```json and ``` if present
-        response = response
-            .replace(/```json/g, "")
-            .replace(/```/g, "")
-            .trim()
-            .replace(/,(\s*[}\]])/g, "$1")
-            .replace(/\\(?!["\\/bfnrtu])/g, "/")
-            .replace(/("(?:command|content|newContent)"\s*:\s*")(.*?)("(?:\s*[,}]))/gs, (_, key, val, end) =>
-                key + val.replace(/(?<!\\)"/g, '\\"') + end
-            );
-
-        const isJson = response.trim().startsWith("{") && response.trim().endsWith("}");
-        const parsed = isJson ? JSON.parse(response.trim()) : null;
-
-        if (parsed?.tools) {
-            toolCalls.push(...parsed.tools);
-            finalPrompt = `prev context - ${finalPrompt}\nYou responded with: ${response}\nIf you need to call any tools use this format:\n${toolExamples}\nonly respond with json tools array, no other text.`;
-        } else if (parsed?.appendSummary) {
-            appendSummary(parsed.appendSummary);
-        }
-    }
-
-    console.log("Final response from Gemini:", response);
-    return response;
-}
-
 export interface ToolCalls {
     name: string;
     args: Record<string, any>;
     dependsOn?: number[];
 }
 
-async function callOpenAI(systemPrompt: string, userMessage: string, chunkFun: (chunk: string) => void): Promise<string> {
+async function streamResponse(prompt: string, userMessage: string, chunkFun: (chunk: string) => void): Promise<string> {
+    const provider = defaultProvider.name;
+
+    if (provider === "gemini") {
+        const genai = new GoogleGenAI({ apiKey: setKeys.gemini });
+        const responseStream = await genai.models.generateContentStream({
+            model: defaultProvider.model,
+            contents: `${prompt}\nUser message: ${userMessage}`,
+        });
+        let response = "";
+        for await (const part of responseStream) {
+            chunkFun(part.text as string);
+            response += part.text;
+        }
+        return response;
+    }
+
     const openai = new OpenAI({ apiKey: setKeys.openai });
+    let response = "";
+
+    if (defaultProvider.model === "local") {
+        const responseStream = await fetch("http://localhost:8080/chat", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                prompt: prompt + "\nUser message: " + userMessage,
+                provider: "deepseek",
+                metadata: { modelType: "instant", allowedTools: ["Search"] }
+            }),
+        }) as any;
+        let buffer = "";
+        for await (const chunk of responseStream.body) {
+            buffer += new TextDecoder().decode(chunk);
+            const parts = buffer.split("\x1E");
+            buffer = parts.pop()!;
+            for (const part of parts) {
+                if (!part.trim()) continue;
+                const data = JSON.parse(part);
+                chunkFun(data.text);
+                response += data.text;
+            }
+        }
+    } else {
+        const responseStream = await openai.chat.completions.create({
+            model: defaultProvider.model,
+            messages: [{ role: "user", content: userMessage }, { role: "system", content: prompt }],
+            stream: true
+        });
+        for await (const part of responseStream) {
+            chunkFun(part.choices[0].delta.content || "");
+            response += part.choices[0].delta.content || "";
+        }
+    }
+
+    return response;
+}
+
+async function callProvider(systemPrompt: string, userMessage: string, chunkFun: (chunk: string) => void): Promise<string> {
     const toolCalls: ToolCalls[] = [];
     let initialPrompt = true;
     let finalPrompt = systemPrompt;
@@ -151,18 +154,16 @@ async function callOpenAI(systemPrompt: string, userMessage: string, chunkFun: (
         initialPrompt = false;
 
         if (toolCalls.length > 0) {
-            const toolStates: ToolState[] = toolCalls.map(tc => {
-                return {
-                    tool: tc,
-                    dependencies: tc.dependsOn || [],
-                    lastRunResult: undefined,
-                    toolExecution: "idle" as const,
-                };
-            });
+            const toolStates: ToolState[] = toolCalls.map(tc => ({
+                tool: tc,
+                dependencies: tc.dependsOn || [],
+                lastRunResult: undefined,
+                toolExecution: "idle" as const,
+            }));
             while (toolStates.some(ts => ts.toolExecution === "idle")) {
                 const runnableTools = getRunnableTools(toolStates);
-                await Promise.all(runnableTools.map(toolCall => {
-                    return runTool(toolCall).then(result => {
+                await Promise.all(runnableTools.map(toolCall =>
+                    runTool(toolCall).then(result => {
                         const toolState = toolStates.find(ts => ts.tool === toolCall);
                         if (toolState && result.result !== undefined) {
                             toolState.toolExecution = "completed";
@@ -170,71 +171,32 @@ async function callOpenAI(systemPrompt: string, userMessage: string, chunkFun: (
                         } else if (toolState && result.error) {
                             toolState.toolExecution = "error";
                             toolState.lastRunResult = result;
+                            getDependantTools(toolStates, toolStates.indexOf(toolState))
+                                .forEach(dt => { dt.toolExecution = "error"; });
                         }
                     }).catch(err => {
                         const toolState = toolStates.find(ts => ts.tool === toolCall);
                         if (toolState) {
                             toolState.toolExecution = "error";
                             toolState.lastRunResult = err;
+                            getDependantTools(toolStates, toolStates.indexOf(toolState))
+                                .forEach(dt => { dt.toolExecution = "error"; });
                         }
-                    });
-                }));
+                    })
+                ));
             }
-            const toolCallResults = toolStates.map(ts => ts.lastRunResult);
-            finalPrompt += `\nTool call results: ${JSON.stringify(toolCallResults)}\nBased on the above tool call results, answer the original question.`;
+            finalPrompt += `\nTool call results: ${JSON.stringify(toolStates.map(ts => ts.lastRunResult))}\nBased on the above tool call results, answer the original question.`;
             toolCalls.length = 0;
         }
 
-        let responseStream;
-        if (defaultProvider.model === "local") {
-            // const extraPrompt = `\nIf you need to call any tools use this format:\n${toolExamples}\nonly respond with json tools array, no other text.`;
-            responseStream = await fetch("http://localhost:8080/chat", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    prompt: finalPrompt + "\nUser message: " + userMessage, provider: "deepseek", metadata: { // provider: "chatgpt" | "deepseek"        
-                        modelType: "instant", // "instant" | "reasoning" | "vision"
-                        allowedTools: ["Search"] // "Search", "DeepThink"
-                    }
-                }),
-            }) as any;
-        } else {
-            responseStream = await openai.chat.completions.create({
-                model: defaultProvider.model,
-                messages: [{ role: "user", content: userMessage }, { role: "system", content: finalPrompt }],
-                stream: true
-            });
-        }
+        response = await streamResponse(finalPrompt, userMessage, chunkFun);
 
-        response = "";
-        if (defaultProvider.model === "local") {
-            let buffer = "";
-            for await (const chunk of responseStream.body) {
-                buffer += new TextDecoder().decode(chunk);
-                const parts = buffer.split("\x1E");
-                buffer = parts.pop()!;
-                for (const part of parts) {
-                    if (!part.trim()) continue;
-                    const data = JSON.parse(part);
-                    chunkFun(data.text);
-                    response += data.text;
-                }
-            }
-        } else {
-            for await (const part of responseStream) {
-                chunkFun(part.choices[0].delta.content || "");
-                response += part.choices[0].delta.content || "";
-            }
-        }
-
-        // remove ```json and ``` if present
         response = response
             .replace(/```json/g, "")
             .replace(/```/g, "")
             .trim()
             .replace(/,(\s*[}\]])/g, "$1")
             .replace(/\\(?!["\\/bfnrtu])/g, "/")
-            // escape unescaped double quotes inside string values
             .replace(/("(?:command|content|newContent)"\s*:\s*")(.*?)("(?:\s*[,}]))/gs, (_, key, val, end) =>
                 key + val.replace(/(?<!\\)"/g, '\\"') + end
             );
@@ -244,14 +206,9 @@ async function callOpenAI(systemPrompt: string, userMessage: string, chunkFun: (
         try {
             parsed = isJson ? JSON.parse(response.trim()) : null;
         } catch (error) {
-            // ask the model to fix its own output
             const errMsg = error instanceof Error ? error.message : String(error);
             finalPrompt += `\nYour last response was invalid JSON. Error: ${errMsg}\nResponse was: ${response}\nFix it and respond with valid JSON only.`;
-            toolCalls.push({
-                name: "__retry__",
-                args: {},
-                dependsOn: []
-            });
+            toolCalls.push({ name: "__retry__", args: {}, dependsOn: [] });
             continue;
         }
 
@@ -406,43 +363,27 @@ ${getSummary() || "No conversation history yet."}
 Message history:
 ${getFormattedHistory()}`;
 
-    let response = "";
-
-    if (defaultProvider.name === "gemini") {
-        if (options?.agentMode === "tool") {
-            response = await callGemini(userMessage, "", chunk);
-        } else {
-            response = await callGemini(systemPrompt, userMessage, chunk);
-        }
-        // response = await callGemini(systemPrompt, userMessage, chunk);
-    } else if (defaultProvider.name === "openai") {
-        if (options?.agentMode === "tool") {
-            response = await callOpenAI(userMessage, "", chunk);
-        } else {
-            response = await callOpenAI(systemPrompt, userMessage, chunk);
-        }
-    } else {
+    if (!["gemini", "openai"].includes(defaultProvider.name)) {
         throw new Error(`Unsupported provider: ${defaultProvider.name}`);
     }
+
+    const response = await callProvider(
+        options?.agentMode === "tool" ? userMessage : systemPrompt,
+        userMessage,
+        chunk
+    );
+
     pushMessage("assistant", response);
 
-    // append summary if LLM returned one
     const isJson = response.trim().startsWith("{") && response.trim().endsWith("}");
     const parsed = isJson ? JSON.parse(response) : null;
-    if (parsed && parsed.appendSummary) {
-        appendSummary(parsed.appendSummary);
-    }
+    if (parsed?.appendSummary) appendSummary(parsed.appendSummary);
 
-    // compress summary when it grows too long
     if (getSummary().length > SUMMARY_COMPRESS_THRESHOLD) {
         chunk(" ---- Compressing conversation history ...");
-        const summaryResponse = await (defaultProvider.name === "gemini"
-            ? callGemini(generateSummeryGenerationPrompt(), "", () => { })
-            : defaultProvider.name === "openai"
-                ? callOpenAI(generateSummeryGenerationPrompt(), "", () => { })
-                : Promise.reject(new Error("Unsupported provider")))
-        const parsed = JSON.parse(summaryResponse);
-        replaceSummary(parsed.newSummary);
+        const summaryResponse = await callProvider(generateSummeryGenerationPrompt(), "", () => {});
+        const summaryParsed = JSON.parse(summaryResponse);
+        replaceSummary(summaryParsed.newSummary);
         chunk(" --- Done. ---");
     }
 
