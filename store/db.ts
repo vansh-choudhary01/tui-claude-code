@@ -12,19 +12,19 @@ export const providersList = ['gemini', 'chatgpt', 'anthropic'];
 
 export const providersModels = {
     gemini: [
-        'gemini-pro',
-        'gemini-flash',
-        'gemini-ultra'
+        'gemini-2.5-flash',
+        'gemini-2.5-flash-lite',
+        'gemini-2.5-pro'
     ],
     chatgpt: [
-        'gpt-4',
-        'gpt-3.5-turbo',
-        'gpt-4-turbo'
+        'gpt-4.1',
+        'gpt-4o',
+        'gpt-4o-mini'
     ],
     anthropic: [
-        'claude-3-opus',
-        'claude-3-sonnet',
-        'claude-3-haiku'
+        'claude-sonnet-4-20250514',
+        'claude-opus-4-20250514',
+        'claude-3-5-haiku-latest'
     ]
 }
 

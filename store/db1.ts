@@ -3,12 +3,21 @@ const path = require('path');
 
 import { defaultProvider, IProvider, setKeys } from "./db";
 
+const DEFAULT_DATA: IProvider = {
+    defaultProvider: { name: 'gemini', model: 'gemini-3.1-pro-preview' },
+    setKeys: {},
+};
+
 export const getDb = (): IProvider => {
     const filename = path.join(process.cwd(), '/store/data.json');
 
+    if (!fs.existsSync(filename)) {
+        fs.writeFileSync(filename, JSON.stringify(DEFAULT_DATA, null, 2));
+        return DEFAULT_DATA;
+    }
+
     const data = fs.readFileSync(filename, 'utf8');
-    var myObject = JSON.parse(data);
-    return myObject;
+    return JSON.parse(data);
 }
 
 export const resetDb = () => {
